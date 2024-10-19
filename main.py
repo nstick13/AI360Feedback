@@ -11,7 +11,7 @@ openai.api_key = os.getenv('OPENAI_API_KEY')
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
-   
+
     # Initialize conversation history if not present
     if 'conversation' not in session:
         session['conversation'] = [
@@ -54,6 +54,7 @@ def home():
             <label for="message">Your message:</label><br>
             <input type="text" id="message" name="message" autofocus><br><br>
             <input type="submit" value="Send">
+            <button id="newConversation">Start New Conversation</button>
         </form>
 
         <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
@@ -67,7 +68,7 @@ def home():
                     // Send the message via AJAX
                     $.ajax({
                         type: 'POST',
-                        url: '/feedback',
+                        url: '/',
                         data: { message: userMessage },
                         success: function(response) {
                             // Append the user message and AI response to the conversation
@@ -79,9 +80,29 @@ def home():
                         }
                     });
                 });
+
+                $('#newConversation').on('click', function(e) {
+                    e.preventDefault(); // Prevent page reload
+
+                    // Clear the session conversation via AJAX
+                    $.ajax({
+                        type: 'POST',
+                        url: '/new_conversation',
+                        success: function() {
+                            // Clear the conversation div
+                            $('#conversation').html('');
+                        }
+                    });
+                });
             });
         </script>
     ''')
+
+@app.route('/new_conversation', methods=['POST'])
+def new_conversation():
+    # Clear the conversation history
+    session.pop('conversation', None)
+    return '', 204
 
 def generate_ai_response(conversation_history):
     try:
