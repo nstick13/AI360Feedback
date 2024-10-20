@@ -5,13 +5,14 @@ from flask_mail import Mail, Message
 import openai
 import os
 from itsdangerous import URLSafeTimedSerializer
+import uuid
 
 # Initialize the Flask app
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'  # For session management
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_SERVER'] = 'smtp.example.com'
 app.config['MAIL_PORT'] = 587
 app.config['MAIL_USE_TLS'] = True
 app.config['MAIL_USERNAME'] = os.getenv('EMAIL_USER')
@@ -35,8 +36,16 @@ openai.api_key = os.getenv('OPENAI_API_KEY')
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(150), unique=True, nullable=False)
-    email = db.Column(db.String(150), unique=True, nullable=False)
+    email = db.Column(db.String(150), nullable=False)
     password = db.Column(db.String(150), nullable=False)
+
+# Feedback Givers Model
+class FeedbackGiver(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    email = db.Column(db.String(150), unique=False, nullable=False)
+    token = db.Column(db.String(100), unique=True, nullable=False)
+    completed = db.Column(db.Boolean, default=False)
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -72,14 +81,27 @@ def signup():
         # Create new user
         new_user = User(username=username, email=email, password=password)
         db.session.add(new_user)
-        db.session.commit()
+
+        try:
+
+            db.session.commit()
+
+        except Exception as e:
+                db.session.rollback()
+                flash(f'An error occurred: {str(e)}', 'danger')
 
         # Send verification email
         token = generate_verification_token(email)
         verify_url = url_for('verify_email', token=token, _external=True)
         msg = Message('Please verify your email', sender='noreply@example.com', recipients=[email])
         msg.body = f'Click the link to verify your email: {verify_url}'
-        mail.send(msg)
+
+        try:
+
+            mail.send(msg)
+
+        except Exception as e:
+                flash(f'Failed to send email: {str(e)}', 'danger')
 
         flash('Account created successfully. A verification email has been sent. Please verify your email to log in.', 'success')
         return redirect(url_for('login'))
@@ -123,7 +145,7 @@ def login():
         user = User.query.filter_by(username=username).first()
         if user and user.password == password:
             login_user(user)
-            return redirect(url_for('home'))
+            return redirect(url_for('dashboard'))
 
         flash('Invalid username or password. Please try again.', 'danger')
 
@@ -146,115 +168,105 @@ def logout():
     flash('You have been logged out.', 'info')
     return redirect(url_for('login'))
 
-@app.route('/', methods=['GET', 'POST'])
+@app.route('/dashboard', methods=['GET', 'POST'])
 @login_required
-def home():
-    # Initialize conversation history if not present
-    if 'conversation' not in session:
-        session['conversation'] = [
-            {"role": "system", "content": (
-                "You're having a casual conversation with a colleague at a coffee shop. "
-                "Your goal is to gather feedback on a Foreign Service Officer (FSO). Keep the conversation light and focused."
-            )}
-        ]
-
+def dashboard():
     if request.method == 'POST':
-        # Get the user's message from the AJAX request
-        user_input = request.form['message']
+        # Get email addresses to send invitations
+        emails = request.form.getlist('emails')
+        if len(emails) > 6:
+            flash('You can add up to 6 unique email addresses.', 'danger')
+            return redirect(url_for('dashboard'))
 
-        # Append the user message to the conversation history
-        conversation = session.get('conversation', [])
-        conversation.append({"role": "user", "content": user_input})
+        # Generate unique tokens and send invitation emails
+        for email in emails:
+            token = str(uuid.uuid4())
+            feedback_giver = FeedbackGiver(user_id=current_user.id, email=email, token=token)
+            db.session.add(feedback_giver)
 
-        # Generate AI response
-        ai_response = generate_ai_response(conversation)
+            try:
 
-        # Append AI response to conversation history
-        conversation.append({"role": "assistant", "content": ai_response})
+                db.session.commit()
 
-        # Save updated conversation back to the session
-        session['conversation'] = conversation
+            except Exception as e:
+                db.session.rollback()
+                flash(f'An error occurred: {str(e)}', 'danger')
 
-        # Return the AI response as JSON (for AJAX)
-        return jsonify({'ai_response': ai_response})
+            feedback_url = url_for('feedback', token=token, _external=True)
+            msg = Message('Feedback Request', sender='noreply@example.com', recipients=[email])
+            msg.body = f'You have been invited to provide feedback. Please click the link to start: {feedback_url}'
+
+            try:
+
+                mail.send(msg)
+
+            except Exception as e:
+                flash(f'Failed to send email: {str(e)}', 'danger')
+
+        flash('Invitations have been sent successfully.', 'success')
+        return redirect(url_for('dashboard'))
 
     # If the request is GET, return the HTML template
     return render_template_string('''
-        <h1>Feedback Conversation</h1>
-        <div id="conversation">
-            {% for message in session['conversation'][1:] %}
-                <p><strong>{{ message.role }}:</strong> {{ message.content }}</p>
-            {% endfor %}
-        </div>
-
-        <form id="chatForm">
-            <label for="message">Your message:</label><br>
-            <input type="text" id="message" name="message" autofocus><br><br>
-            <input type="submit" value="Send">
-            <button id="newConversation">Start New Conversation</button>
+        <h1>Welcome {{ current_user.username }}</h1>
+        <form id="inviteForm" method="POST">
+            <div id="emailFields">
+                <label for="emails">Enter up to 6 email addresses to invite for feedback:</label><br>
+                <input type="email" name="emails" required><br><br>
+            </div>
+            <button type="button" id="addEmailField">Add Another</button><br><br>
+            <input type="submit" value="Send Invitations">
         </form>
         <a href="{{ url_for('logout') }}">Logout</a>
 
-        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
         <script>
-            $(document).ready(function() {
-                $('#chatForm').on('submit', function(e) {
-                    e.preventDefault(); // Prevent page reload
-
-                    var userMessage = $('#message').val(); // Get the message from the input
-
-                    // Send the message via AJAX
-                    $.ajax({
-                        type: 'POST',
-                        url: '/',
-                        data: { message: userMessage },
-                        success: function(response) {
-                            // Append the user message and AI response to the conversation
-                            $('#conversation').append('<p><strong>user:</strong> ' + userMessage + '</p>');
-                            $('#conversation').append('<p><strong>assistant:</strong> ' + response.ai_response + '</p>');
-
-                            // Clear the input field
-                            $('#message').val('');
-                        }
-                    });
-                });
-
-                $('#newConversation').on('click', function(e) {
-                    e.preventDefault(); // Prevent page reload
-
-                    // Clear the session conversation via AJAX
-                    $.ajax({
-                        type: 'POST',
-                        url: '/new_conversation',
-                        success: function() {
-                            // Clear the conversation div
-                            $('#conversation').html('');
-                        }
-                    });
+            document.addEventListener('DOMContentLoaded', function() {
+                const maxFields = 6;
+                let emailCount = 1;
+                document.getElementById('addEmailField').addEventListener('click', function() {
+                    if (emailCount < maxFields) {
+                        const emailFieldsDiv = document.getElementById('emailFields');
+                        const newField = document.createElement('div');
+                        newField.innerHTML = '<input type="email" name="emails" required><br><br>';
+                        emailFieldsDiv.appendChild(newField);
+                        emailCount++;
+                    } else {
+                        alert('You can only add up to 6 email addresses.');
+                    }
                 });
             });
         </script>
     ''')
 
-@app.route('/new_conversation', methods=['POST'])
-def new_conversation():
-    # Clear the conversation history
-    session.pop('conversation', None)
-    return '', 204
+@app.route('/feedback/<token>', methods=['GET', 'POST'])
+def feedback(token):
+    feedback_giver = FeedbackGiver.query.filter_by(token=token, completed=False).first()
+    if not feedback_giver:
+        flash('Invalid or expired feedback link.', 'danger')
+        return redirect(url_for('dashboard'))
 
-def generate_ai_response(conversation_history):
-    try:
-        # Send the conversation to OpenAI API
-        response = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=conversation_history,
-            temperature=0.7,
-            max_completion_tokens=150
-        )
-        # Access the assistant's message content
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"An error occurred: {e}"
+    if request.method == 'POST':
+        # Handle feedback submission here
+        feedback_giver.completed = True
+
+        try:
+
+            db.session.commit()
+
+        except Exception as e:
+                db.session.rollback()
+                flash(f'An error occurred: {str(e)}', 'danger')
+        flash('Thank you for your feedback!', 'success')
+        return redirect(url_for('dashboard'))
+
+    return render_template_string('''
+        <h1>Feedback for {{ feedback_giver.email }}</h1>
+        <form method="POST">
+            <label for="feedback">Your feedback:</label><br>
+            <textarea id="feedback" name="feedback" rows="4" cols="50" required></textarea><br><br>
+            <input type="submit" value="Submit Feedback">
+        </form>
+    ''', feedback_giver=feedback_giver)
 
 if __name__ == "__main__":
     with app.app_context():
