@@ -1,0 +1,7 @@
+Flask
+Flask-SQLAlchemy
+Flask-Login
+Flask-Mail
+openai
+Flask-Testing
+itsdangerous
